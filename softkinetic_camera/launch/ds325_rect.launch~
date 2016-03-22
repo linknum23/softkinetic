@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!--
+Demo launch file to run single softkinetic camera in stand alone (no other /tf) setup with Rviz
+The arguments given are the device indices of the cameras determined by the DepthSense deamon.
+-->
+<launch>
+  <include file="$(find softkinetic_camera)/launch/softkinetic_camera_ds325.launch">
+    <arg name="rgb_calibration_file" value="$(find softkinetic_camera)/resources/senz3d.yaml"/>
+  </include>
+  <node pkg="nodelet" type="nodelet" name="standalone_nodelet"  args="manager" output="screen"/>
+  <node pkg="nodelet" type="nodelet" name="rectify" args="load image_proc/rectify standalone_nodelet" output="screen">
+    <remap from="image_mono" to="/softkinetic_camera/rgb/image_color" />
+    <remap from="camera_info" to="/softkinetic_camera/rgb/camera_info" />
+    <remap from="image_rect" to="/softkinetic_camera/rgb/image_rect" />
+  </node>
+  <node pkg="nodelet" type="nodelet" name="register" args="load depth_image_proc/register standalone_nodelet" output="screen">
+    <remap from="rgb/camera_info" to="/softkinetic_camera/rgb/camera_info" />
+    <remap from="depth/camera_info" to="/softkinetic_camera/depth/camera_info" />
+    <remap from="depth/image_rect" to="/softkinetic_camera/depth/image_raw" />
+    <remap from="depth_registered/image_rect" to="/softkinetic_camera/depth_registered/image_rect" />
+  </node>
+  <node pkg="tf" type="static_transform_publisher" name="sk_ds325_link" args="0.026 0 0 0 0 0 1 softkinetic_rgb_optical_frame softkinetic_depth_optical_frame 100" />
+</launch>

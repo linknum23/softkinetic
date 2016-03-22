@@ -110,20 +110,28 @@ bool g_bDeviceFound = false;
 
 ros::Publisher pub_cloud;
 ros::Publisher pub_rgb_info;
+ros::Publisher pub_rgb_lowres_info;
 ros::Publisher pub_depth_info;
+
 image_transport::Publisher pub_rgb;
+image_transport::Publisher pub_rgb_lowres;
 image_transport::Publisher pub_mono;
 image_transport::Publisher pub_depth;
 
+ros::Duration skTimeOffset;
+
 sensor_msgs::CameraInfo rgb_info;
+sensor_msgs::CameraInfo rgb_lowres_info;
 sensor_msgs::CameraInfo depth_info;
 
 sensor_msgs::Image img_rgb;
+sensor_msgs::Image img_rgb_lowres;
 sensor_msgs::Image img_mono;
 sensor_msgs::Image img_depth;
 sensor_msgs::PointCloud2 cloud;
 
 cv::Mat cv_img_rgb; // Open CV image containers
+cv::Mat cv_img_rgb_lowres;
 cv::Mat cv_img_yuy2;
 cv::Mat cv_img_mono;
 cv::Mat cv_img_depth;
@@ -209,6 +217,15 @@ DepthSense::FrameFormat colorFrameFormat(const std::string& color_frame_format_s
     return FRAME_FORMAT_WXGA_H;
 }
 
+// time conversion from SoftKinetic driver to ROS Time
+static ros::Time toROSTime(uint64 skTime_us){
+  //NOTE: from the internet, softkinetic times are from microseconds in linux clock CLOCK_MONOTONIC
+  uint64_t nsecondsInClockMono = skTime_us * 1000;
+  ros::Time projected;
+  return projected.fromNSec(nsecondsInClockMono) + skTimeOffset;
+}
+
+
 /*----------------------------------------------------------------------------*/
 // New audio sample event handler
 void onNewAudioSample(AudioNode node, AudioNode::NewSampleReceivedData data)
@@ -221,12 +238,19 @@ void onNewAudioSample(AudioNode node, AudioNode::NewSampleReceivedData data)
 // New color sample event handler
 void onNewColorSample(ColorNode node, ColorNode::NewSampleReceivedData data)
 {
+  // Ensure that all the images and camera info are timestamped and have the proper frame id
+  img_rgb.header.stamp   = toROSTime(data.timeOfCapture);
+  img_mono.header        = img_rgb.header;
+  img_rgb_lowres.header  = img_rgb.header;
+  rgb_info.header        = img_rgb.header;
+  rgb_lowres_info.header = img_rgb.header;
+
   // If this is the first sample, we fill all the constant values
   // on image and camera info messages to increase working rate
   if (img_rgb.data.size() == 0)
   {
     // Create two sensor_msg::Image for color and grayscale images on new camera image
-    int32_t w, h;
+    int32_t w, h, w_lowres,  h_lowres;
     FrameFormat_toResolution(data.captureConfiguration.frameFormat, &w, &h);
 
     img_rgb.width  = w;
@@ -235,6 +259,20 @@ void onNewColorSample(ColorNode node, ColorNode::NewSampleReceivedData data)
     img_rgb.data.resize(w * h * 3);
     img_rgb.step = w * 3;
 
+    float scale = 0.25;
+    w_lowres = (int)(w * scale);
+    h_lowres = (int)(h * scale);
+
+    img_rgb_lowres.width = w_lowres;
+    img_rgb_lowres.height = h_lowres;
+    img_rgb_lowres.encoding = "bgr8";
+    img_rgb_lowres.data.resize(w_lowres*h_lowres*3);
+    img_rgb_lowres.step = w_lowres * 3;
+
+    rgb_lowres_info.height = h_lowres;
+    rgb_lowres_info.width = w_lowres;
+
+
     img_mono.width  = w;
     img_mono.height = h;
     img_mono.encoding = "mono8";
@@ -242,8 +280,8 @@ void onNewColorSample(ColorNode node, ColorNode::NewSampleReceivedData data)
     img_mono.step = w;
 
     cv_img_rgb.create(h, w, CV_8UC3);
-    if (color_compression == COMPRESSION_TYPE_YUY2)
-      cv_img_yuy2.create(h, w, CV_8UC2);
+    cv_img_rgb_lowres.create(h_lowres, w_lowres, CV_8UC3);
+    cv_img_yuy2.create(h, w, CV_8UC2); // compression is reconfigurable
   }
 
   if (color_compression == COMPRESSION_TYPE_YUY2)
@@ -259,23 +297,37 @@ void onNewColorSample(ColorNode node, ColorNode::NewSampleReceivedData data)
     cv_img_rgb.data = reinterpret_cast<uchar *>(
           const_cast<uint8_t *>(static_cast<const uint8_t *>(data.colorMap)));
   }
-  // Create also a gray-scale image from the BGR one
-  cvtColor(cv_img_rgb, cv_img_mono, CV_BGR2GRAY);
 
-  // Dump both on ROS image messages
-  std::memcpy(img_rgb.data.data(),  cv_img_rgb.ptr(),  img_rgb.data.size());
-  std::memcpy(img_mono.data.data(), cv_img_mono.ptr(), img_mono.data.size());
+  // lazy publishing to save processing resources
+  if(pub_rgb.getNumSubscribers() > 0)
+  {
+    // Publish the image
+    std::memcpy(img_rgb.data.data(),  cv_img_rgb.ptr(),  img_rgb.data.size());
+    pub_rgb.publish(img_rgb);
+  }
+  if(pub_rgb_lowres.getNumSubscribers() > 0)
+  {
+    // Create a lowres color image for matching with the depth image
+    // CV_INTER_AREA interpolation is used since it is recommended for image shrinking
+    resize(cv_img_rgb, cv_img_rgb_lowres, cv::Size(), 0.25, 0.25, CV_INTER_AREA);
 
-  // Ensure that all the images and camera info are timestamped and have the proper frame id
-  img_rgb.header.stamp = ros::Time::now();
-  img_mono.header      = img_rgb.header;
-  rgb_info.header      = img_rgb.header;
+    // Publish the lowres image
+    std::memcpy(img_rgb_lowres.data.data(),  cv_img_rgb_lowres.ptr(),  img_rgb_lowres.data.size());
+    pub_rgb_lowres.publish(img_rgb_lowres);
+  }
+  if(pub_mono.getNumSubscribers() > 0 )
+  {
+    // Create also a gray-scale image from the BGR one
+    cvtColor(cv_img_rgb, cv_img_mono, CV_BGR2GRAY);
 
-  // Publish the rgb and mono images and camera info
-  pub_rgb.publish(img_rgb);
-  pub_mono.publish(img_mono);
+    // Publish the grayscale image
+    std::memcpy(img_mono.data.data(), cv_img_mono.ptr(), img_mono.data.size());
+    pub_mono.publish(img_mono);
+  }
 
-  pub_rgb_info.publish(rgb_info);
+  // Always publish the camera infos
+  pub_rgb_info.publish(rgb_info);  // same for rgb and mono
+  pub_rgb_lowres_info.publish(rgb_lowres_info);
 
   ++g_cFrames;
 }
@@ -414,127 +466,129 @@ void setupCameraInfo(const DepthSense::IntrinsicParameters& params, sensor_msgs:
 }
 
 // New depth sample event
-void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data)
-{
+void onNewDepthSample(DepthNode node, DepthNode::NewSampleReceivedData data) {
+
+  img_depth.header.stamp = toROSTime(data.timeOfCapture);
+  depth_info.header      = img_depth.header;
+
   // If this is the first sample, we fill all the constant values
   // on image and camera info messages to increase working rate
-  if (img_depth.data.size() == 0)
-  {
+  if (img_depth.data.size() == 0) {
     FrameFormat_toResolution(data.captureConfiguration.frameFormat,
-                             (int32_t*)&img_depth.width, (int32_t*)&img_depth.height);
+                             (int32_t *) &img_depth.width, (int32_t *) &img_depth.height);
     img_depth.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
     img_depth.is_bigendian = 0;
     img_depth.step = sizeof(float) * img_depth.width;
     std::size_t data_size = img_depth.width * img_depth.height;
     img_depth.data.resize(data_size * sizeof(float));
 
-    if (rgb_info.D.size() == 0)
-    {
+    if (rgb_info.D.size() == 0) {
       // User didn't provide a calibration file for the color camera, so
       // fill camera info with the parameters provided by the camera itself
       setupCameraInfo(data.stereoCameraParameters.colorIntrinsics, rgb_info);
     }
 
-    if (depth_info.D.size() == 0)
-    {
+    if (depth_info.D.size() == 0) {
       // User didn't provide a calibration file for the depth camera, so
       // fill camera info with the parameters provided by the camera itself
       setupCameraInfo(data.stereoCameraParameters.depthIntrinsics, depth_info);
+    }
+
+    if(rgb_lowres_info.D.size() == 0){
+      ROS_ERROR("lowres calibration file not provided");
     }
   }
 
   int32_t w = img_depth.width;
   int32_t h = img_depth.height;
 
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr current_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
-  current_cloud->header.frame_id = cloud.header.frame_id;
-  current_cloud->width  = w;
-  current_cloud->height = h;
-  current_cloud->is_dense = true;
-  current_cloud->points.resize(w * h);
+  // Don't calculate point cloud unless its necessary
+  if(pub_cloud.getNumSubscribers() > 0 || pub_depth.getNumSubscribers() > 0){
 
-  ++g_dFrames;
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr current_cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
+    current_cloud->header.frame_id = cloud.header.frame_id;
+    current_cloud->width = w;
+    current_cloud->height = h;
+    current_cloud->is_dense = true;
+    current_cloud->points.resize(w * h);
 
-  // Dump depth map on image message, though we must do some post-processing for saturated pixels
-  std::memcpy(img_depth.data.data(), data.depthMapFloatingPoint, img_depth.data.size());
+    ++g_dFrames;
 
-  for (int count = 0; count < w * h; count++)
-  {
-    // Saturated pixels on depthMapFloatingPoint have -1 value, but on openni are NaN
-    if (data.depthMapFloatingPoint[count] < 0.0)
-    {
-      *reinterpret_cast<float*>(&img_depth.data[count*sizeof(float)]) =
-          std::numeric_limits<float>::quiet_NaN();
+    // Dump depth map on image message, though we must do some post-processing for saturated pixels
+    std::memcpy(img_depth.data.data(), data.depthMapFloatingPoint, img_depth.data.size());
 
-      // We don't process these pixels as they correspond to all-zero 3D points; but
-      // we keep them in the pointcloud so the downsampling filter can be applied
-      continue;
+    for (int count = 0; count < w * h; count++) {
+      // Saturated pixels on depthMapFloatingPoint have -1 value, but on openni are NaN
+      if (data.depthMapFloatingPoint[count] < 0.0) {
+        *reinterpret_cast<float *>(&img_depth.data[count * sizeof(float)]) =
+                std::numeric_limits<float>::quiet_NaN();
+
+        // We don't process these pixels as they correspond to all-zero 3D points; but
+        // we keep them in the pointcloud so the downsampling filter can be applied
+        continue;
+      }
+
+      // Convert softkinetic vertices into a kinect-like coordinates pointcloud
+      current_cloud->points[count].x = data.verticesFloatingPoint[count].z;
+      current_cloud->points[count].y = -data.verticesFloatingPoint[count].x;
+      current_cloud->points[count].z = data.verticesFloatingPoint[count].y;
+
+      // Get mapping between depth map and color map, assuming we have a RGB image
+      if (img_rgb.data.size() == 0) {
+        ROS_WARN_THROTTLE(2.0, "Color image is empty; pointcloud will be colorless");
+        continue;
+      }
+      UV uv = data.uvMap[count];
+      if (uv.u != -FLT_MAX && uv.v != -FLT_MAX) {
+        // Within bounds: depth fov is significantly wider than color's
+        // one, so there are black points in the borders of the pointcloud
+        int x_pos = (int) round(uv.u * img_rgb.width);
+        int y_pos = (int) round(uv.v * img_rgb.height);
+        current_cloud->points[count].b = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[0];
+        current_cloud->points[count].g = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[1];
+        current_cloud->points[count].r = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[2];
+      }
     }
 
-    // Convert softkinetic vertices into a kinect-like coordinates pointcloud
-    current_cloud->points[count].x =   data.verticesFloatingPoint[count].z;
-    current_cloud->points[count].y = - data.verticesFloatingPoint[count].x;
-    current_cloud->points[count].z =   data.verticesFloatingPoint[count].y;
+    if(pub_cloud.getNumSubscribers() > 0) {
+      // Check for usage of voxel grid filtering to downsample point cloud
+      // XXX This must be the first filter to be called, as it requires the "squared" point cloud
+      // we create (with proper values for width and height) that any other filter would destroy
+      if (use_voxel_grid_filter) {
+        downsampleCloud(current_cloud);
+      }
 
-    // Get mapping between depth map and color map, assuming we have a RGB image
-    if (img_rgb.data.size() == 0)
-    {
-      ROS_WARN_THROTTLE(2.0, "Color image is empty; pointcloud will be colorless");
-      continue;
+      // Check for usage of passthrough filtering
+      if (use_passthrough_filter) {
+        filterPassThrough(current_cloud);
+      }
+
+      // Check for usage of frustum culling filtering
+      if (use_frustum_culling_filter) {
+        filterFrustumCulling(current_cloud);
+      }
+
+      // Check for usage of radius outlier filtering
+      if (use_radius_outlier_filter) {
+        // XXX Use any other filter before this one to remove the large amount of all-zero points the
+        // camera creates for saturated pixels; if not, radius outlier filter takes really, really long
+        if (use_voxel_grid_filter || use_passthrough_filter || use_frustum_culling_filter)
+          filterCloudRadiusBased(current_cloud);
+        else
+          ROS_WARN_THROTTLE(2.0, "Calling radius outlier removal as the only filter would take too long!");
+      }
+
+      // Convert current_cloud to PointCloud2 and publish
+      pcl::toROSMsg(*current_cloud, cloud);
+
+      pub_cloud.publish(cloud);
     }
-    UV uv = data.uvMap[count];
-    if (uv.u != -FLT_MAX && uv.v != -FLT_MAX)
-    {
-      // Within bounds: depth fov is significantly wider than color's
-      // one, so there are black points in the borders of the pointcloud
-      int x_pos = (int)round(uv.u*img_rgb.width);
-      int y_pos = (int)round(uv.v*img_rgb.height);
-      current_cloud->points[count].b = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[0];
-      current_cloud->points[count].g = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[1];
-      current_cloud->points[count].r = cv_img_rgb.at<cv::Vec3b>(y_pos, x_pos)[2];
-    }
   }
-
-  // Check for usage of voxel grid filtering to downsample point cloud
-  // XXX This must be the first filter to be called, as it requires the "squared" point cloud
-  // we create (with proper values for width and height) that any other filter would destroy
-  if (use_voxel_grid_filter)
-  {
-    downsampleCloud(current_cloud);
+  if(pub_depth.getNumSubscribers() > 0) {
+    pub_depth.publish(img_depth);
   }
-
-  // Check for usage of passthrough filtering
-  if (use_passthrough_filter)
-  {
-    filterPassThrough(current_cloud);
-  }
-
-  // Check for usage of frustum culling filtering
-  if (use_frustum_culling_filter)
-  {
-    filterFrustumCulling(current_cloud);
-  }
-
-  // Check for usage of radius outlier filtering
-  if (use_radius_outlier_filter)
-  {
-    // XXX Use any other filter before this one to remove the large amount of all-zero points the
-    // camera creates for saturated pixels; if not, radius outlier filter takes really, really long
-    if (use_voxel_grid_filter || use_passthrough_filter || use_frustum_culling_filter)
-      filterCloudRadiusBased(current_cloud);
-    else
-      ROS_WARN_THROTTLE(2.0, "Calling radius outlier removal as the only filter would take too long!");
-  }
-
-  // Convert current_cloud to PointCloud2 and publish
-  pcl::toROSMsg(*current_cloud, cloud);
-
-  img_depth.header.stamp = ros::Time::now();
-  depth_info.header      = img_depth.header;
-
-  pub_cloud.publish(cloud);
-  pub_depth.publish(img_depth);
   pub_depth_info.publish(depth_info);
+
 }
 
 /*----------------------------------------------------------------------------*/
@@ -846,8 +900,8 @@ int main(int argc, char* argv[])
   }
   else
   {
-    img_rgb.header.frame_id = "/softkinetic_rgb_optical_frame";
-    img_mono.header.frame_id = "/softkinetic_rgb_optical_frame";
+    img_rgb.header.frame_id = "softkinetic_rgb_optical_frame";
+    img_mono.header.frame_id = "softkinetic_rgb_optical_frame";
   }
 
   if (nh.getParam("depth_optical_frame", optical_frame))
@@ -856,7 +910,7 @@ int main(int argc, char* argv[])
   }
   else
   {
-    img_depth.header.frame_id = "/softkinetic_depth_optical_frame";
+    img_depth.header.frame_id = "softkinetic_depth_optical_frame";
   }
 
   // Get confidence threshold from parameter server
@@ -974,12 +1028,16 @@ int main(int argc, char* argv[])
   // Initialize publishers
   pub_cloud = nh.advertise<sensor_msgs::PointCloud2>("depth/points", 1);
   pub_rgb = it.advertise("rgb/image_color", 1);
+  pub_rgb_lowres = it.advertise("rgb_lowres/image_raw", 1);
   pub_mono = it.advertise("rgb/image_mono", 1);
   pub_depth = it.advertise("depth/image_raw", 1);
   pub_depth_info = nh.advertise<sensor_msgs::CameraInfo>("depth/camera_info", 1);
   pub_rgb_info = nh.advertise<sensor_msgs::CameraInfo>("rgb/camera_info", 1);
+  pub_rgb_lowres_info = nh.advertise<sensor_msgs::CameraInfo>("rgb_lowres/camera_info", 1);
 
   std::string calibration_file;
+  //TODO: this calibration data loading should be handled differently so we can interact nicely with camera calibration
+  // IDEA: launch 3 camera calibration managers, one per sensor. Write out sensor calibration to file that can be loaded by camera calibration managers if parameter is not passed.
   if (nh.getParam("rgb_calibration_file", calibration_file))
   {
     camera_info_manager::CameraInfoManager camera_info_manager(nh, "senz3d", "file://" + calibration_file);
@@ -992,10 +1050,27 @@ int main(int argc, char* argv[])
     depth_info = camera_info_manager.getCameraInfo();
   }
 
+  if (nh.getParam("rgb_lowres_calibration_file", calibration_file))
+  {
+    camera_info_manager::CameraInfoManager camera_info_manager(nh, "senz3d", "file://" + calibration_file);
+    rgb_lowres_info = camera_info_manager.getCameraInfo();
+  }
+
   g_context = Context::create("softkinetic");
 
   g_context.deviceAddedEvent().connect(&onDeviceConnected);
   g_context.deviceRemovedEvent().connect(&onDeviceDisconnected);
+
+  // Synchronize the relative time published by the SoftKinectic driver to the wall clock time
+  // the SoftKinectic driver appears to report times in CLOCK_MONOTONIC linux clock
+  ros::Time treal = ros::Time::now();
+  timespec tmono;
+  if(0 == clock_gettime(CLOCK_MONOTONIC, &tmono)) {
+    ros::Time tmono2(tmono.tv_sec, tmono.tv_nsec);
+    skTimeOffset = treal - tmono2;
+  }else{
+    ROS_ERROR("unable to synchronize clocks between softkinectic driver and roscore");
+  }
 
   // Get the list of currently connected devices
   vector<Device> da = g_context.getDevices();

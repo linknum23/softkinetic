@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!--
+launch the softkinectic ds325 for calibration
+-->
+<launch>
+  <include file="$(find softkinetic_camera)/launch/softkinetic_camera_ds325.launch"/>
+  <node pkg="camera_calibration" type="cameracalibrator.py" name="ds325cal" args="--size 8x6 --square 0.0254 --no-service-check camera:=/softkinetic_camera/rgb image:=/softkinetic_camera/rgb/image_color" output="screen">
+  </node>
+</launch>

@@ -29,5 +29,8 @@ The arguments given are the device indices of the cameras determined by the Dept
     <param name="color_compression"         type="string"    value="MJPEG" /> <!-- YUY2, MJPEG -->
     <param name="color_frame_format"        type="string"    value="WXGA"  /> <!-- QQVGA, QVGA, VGA, WXGA, NHD -->
     <param name="color_frame_rate"          type="int"       value="25"    /> <!-- 25, 30 -->
+
+    <param name="rgb_calibration_file" value="$(find softkinetic_camera)/resources/senz3d.yaml"/>
+    <param name="rgb_lowres_calibration_file" value="$(find softkinetic_camera)/resources/senz3d_lowres.yaml"/>
   </node>
 </launch>

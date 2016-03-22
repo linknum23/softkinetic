@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!--
+launch the softkinectic ds325 for mapping with rtabmap
+hopefully it is awesome
+-->
+<launch>
+  <include file="$(find softkinetic_camera)/launch/ds325_rect.launch"/>
+  <include file="$(find rtabmap_ros)/launch/rgbd_mapping.launch">
+    <arg name="rtabmap_args" value="--delete_db_on_start"/>
+    <arg name="depth_registered_topic" value="/softkinetic_camera/depth_registered/image_rect"/>
+    <arg name="rgb_topic" value="/softkinetic_camera/rgb_lowres/image_rect"/>
+    <arg name="camera_info_topic" value="/softkinetic_camera/rgb_lowres/camera_info"/>
+    <arg name="min_inliers" value="10"/>
+    <arg name="strategy" value="0"/> <!-- 0 = bag of words, 1=optical flow -->
+    <arg name="local_map" value="1000"/>
+    <arg name="inlier_distance" value="0.1 "/>
+    <arg name="estimation" value="1" /> <!-- Motion estimation approach: 0:3D->3D, 1:3D->2D (PnP) -->
+  </include>
+  <node pkg="tf" type="static_transform_publisher" name="sk_ds325_clink" args="0 0 0 -1.5707963 0 -1.5707963 camera_link softkinetic_rgb_optical_frame 50" />
+</launch>
